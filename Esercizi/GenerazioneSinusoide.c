@@ -1,53 +1,69 @@
-//generare una sinusoide che abbia un ampiezza di 1 volt con offset di 1 volt
-//Vsin= 1 + 1*(2pi*i/100) -> decidiamo di avere 100 campioni ad esempio
-//1 è l'offset mentre l'ampiezza oscilla tra [-0,5 e 5]
-//i varia tra 0 e 99
+#include <stm32f30x.h>
+#include <stdio.h>
 
-#include<math.h>
-#include "stm32f30x.h"
-
-#define N 100 
-#define PI 3.14
-
-short int vett[N]; //vettore per la codifica dei valori della sinusoide
-//Il DAC richiede in ingresso un codice
-void gen_sin(float);//prototipo
+float ris;
+int eoc = 0;
 
 void main(){
-   
-	//abilito le periferiche interessate
-	 RCC->AHBENR |= RCC_AHBENR_GPIOAEN; //abilito GPIOA
-	 RCC->APB1ENR |= RCC_APB1ENR_DAC1EN; //abilito DAC1
-   RCC->APB1ENR |= RCC_APB1ENR_TIM2EN; //abilito TIM2
-  
-   gen_sin(0.5); //genero la codifica della sinusoide 
-   
-   GPIOA->MODER |= GPIOA_MODER_MODER4; //PA4 in uscita analogica per evitare il sovraccarico del DAC
-   
-   DAC->CR |= DAC_CR_EN1; //abilito il canale 1
-   
-   //aggancio la generazione del campione a un update event (ogni 0.5 sec ad esempio)
-   TIM2->ARR = 36000000; //0.5 secondi
-   TIM2->CNT = 0; //azzero il conteggio
-   TIM2->CR1 = TIM_CR1_CEN; //avvio il conteggio
+	//configurazione ADC
+	RCC->AHBENR |= RCC_AHBENR_ADC12EN; //abilito la coppia di ADC12
+	ADC1_2->CCR |= ADC12_CCR_CKMODE_0; //CKMODE=01, clock del bus AHB
 
+	//Abilitazione GPIOA (per il pulsante USER)
+	RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+	//PA0 in modalità analogica (MODER0=11)
+	GPIOA->MODER |= GPIO_MODER_MODER0;
+
+	//abilitiamo generatore di tensione di riferimento pulita per non avere incertezze-> regolatore di tensione
+	ADC1->CR &= ~ADC_CR_ADVREGEN_1; //ADVREGEN = 10->00 (reset)
+	ADC1->CR |= ADC_CR_ADVREGEN_0;  //ADVREGEN = 00->01 (abilitazione)
+	for(int i=0; i<1000; i++);      //attesa di 10 µs
+
+	//verifica che l'ADC sia disabilitato (ADEN==0)
+	ADC1->CR &= ~ADC_CR_ADEN; 
+
+	//modalità di acquisizione single-ended 
+	ADC1->DIFSEL &= ADC_DIFSEL_DIFSEL_1; //DIFSEL=0->single ended
+
+	//CALIBRAZIONE 
+	ADC1->CR &= ~ADC_CR_ADCALDIF; //Calibrazione single-ended (ADCALDIF = 0)
+	ADC1->CR |= ADC_CR_ADCAL; //ADCAL=1, avvio la calibrazione
+	while((ADC1->CR & ADC_CR_ADCAL) == ADC_CR_ADCAL); //attendo ADCAL=0 (fine calib)
+
+	//ABILITAZIONE ADC
+	ADC1->CR |= ADC_CR_ADEN;  //ADEN=1, abilitazione ADC
+	while((ADC1->ISR & ADC_ISR_ADRD) != ADC_ISR_ADRD); //attesa ADRDY=1
+	//(nell' Interrupt and Status register)
+
+	//SCELTA CANALE e TSAMPLE VA FATTA DOPO L'ABILITAZIONE ADC
+	//Seleziono il TSAMPLE nel registro SMPR1
+	ADC1->SMPR1 |= ADC_SMPR1_SMP3; //SMP3=111, 601.5 CK
+	//CONT=0, conversione singola
+	ADC1->CFGR &= ~ADC_CFGR_CONT;
+	//quanti canali dobbiamo convertire (BIT L)
+	ADC1->SQR1 &= ~ADC_SQR1_L; //L=0: 1 sola conversione
+	//scelta del canale
+	ADC1->SQR1 = ADC_SQR1_SQ1_0;  //SQ1=0001: canale 1 (PA0) 
 	
-   
-   for(int i=0; i<N; i++){
-	   //scrivo il codice nel DHR
-	   DAC1->DHR12R1 = vett[i];
-	   while((TIM2->SR & TIM_SR_UIF) != TIM_SR_UIF); //attesa UIF=1->UEV avvenuto
-	   TIM2->SR &= ~TIM_SR_UIF; //UIF=0;
-	   for(int j=0; j<1000; j++); //attesa generazione di tensione
-   }
-   
-   while(1);
-}
+	//AVVIO CONVERSIONE
+	ADC1->CR |= ADC_CR_ADSTART; //ADSTART=1, avvio conversione
 
-void gen_sin(float ampiezza){
-  float Vsin;
-  for(int i=0; i<N; i++){
-    Vsin = 1 + ampiezza*sin(2*PI*i/N);
-    vett[i] = (short int) (Vsin*4095.0/3.0); //codifica dei valori
-  }
+	//interruzioni
+	ADC1->IER != ADC_ISR_EOC; //abilito EOC
+	NVIC->ISER[0] |= (1<<18); //NVIC serve ADC1 e ADC2 global interrupt
+
+	while(1){
+		if(eoc==1){
+			eoc=0;
+			ris = ADC1->DR*(3.0/4096.0); //risultato * VDD/2^n
+		
+			printf("risultato: %f\n", ris);
+		}
+	
+	}
+void ADC1_2_IRQHandler(){
+	if((ADC1->ISR & ADC_ISR_EOC) == ADC_ISR_EOC){ //se EOC = 1
+		ADC1->ISR |= ADC_ISR_EOC; //lo azzero
+		eoc = 1;
+	}
 }
